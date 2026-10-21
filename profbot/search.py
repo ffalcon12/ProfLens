@@ -84,14 +84,8 @@ def get_works(author_id, sort, field_ids=None, n=5):
 
 # ---------- main function ----------
 
-def search_professor(name, college, prefer_field=17, min_share=0.10, n=5):
-    """
-    Find the best-matching professor and return a dict, or None if no match.
-
-    prefer_field: field used ONLY to choose between candidate profiles
-                  (17 = Computer Science, None = no preference).
-    min_share:    minimum fraction of topic activity for a field to be included.
-    """
+def find_candidates(name, college, prefer_field=17):
+    """All candidates whose institution matches the college, best first."""
     r = httpx.get(
         f"{BASE}/authors",
         params={
@@ -103,43 +97,62 @@ def search_professor(name, college, prefer_field=17, min_share=0.10, n=5):
         timeout=30,
     )
     r.raise_for_status()
-    candidates = r.json()["results"]
 
-    # keep candidates whose institution contains the college text
     matches = []
-    for a in candidates:
+    for a in r.json()["results"]:
         insts = a.get("last_known_institutions") or []
-        names = [i["display_name"] for i in insts]
-        if any(college.lower() in nm.lower() for nm in names):
+        if any(college.lower() in i["display_name"].lower() for i in insts):
             matches.append(a)
 
-    if not matches:
-        return None
-
-    # pick: highest share in the preferred field, then most works
     def score(a):
         share = field_share(a, prefer_field) if prefer_field is not None else 0.0
         return (share, a["works_count"])
 
-    best = max(matches, key=score)
-    author_id = best["id"].split("/")[-1]
+    matches.sort(key=score, reverse=True)
+    return matches
 
-    fields = top_fields(best, min_share)
+
+def serious_candidates(matches, prefer_field=17):
+    """Candidates big enough and on-field enough to be the real person."""
+    if not matches:
+        return []
+    best = matches[0]
+    best_share = field_share(best, prefer_field) if prefer_field is not None else 0.0
+    min_works = max(5, 0.2 * best["works_count"])
+
+    return [
+        a for a in matches
+        if a["works_count"] >= min_works
+        and (field_share(a, prefer_field) if prefer_field is not None else 0.0) >= 0.5 * best_share
+    ]
+
+
+def build_result(author, n_matches=1, min_share=0.10, n=5, use_filter=True):
+    """Fetch works for one chosen author and return the result dict."""
+    author_id = author["id"].split("/")[-1]
+    fields = top_fields(author, min_share) if use_filter else []
     field_ids = [fid for fid, _ in fields]
 
     return {
-        "name": best["display_name"],
-        "id": best["id"],
-        "works_count": best["works_count"],
-        "cited_by_count": best["cited_by_count"],
-        "institutions": [i["display_name"] for i in (best.get("last_known_institutions") or [])],
-        "topics": [t["display_name"] for t in (best.get("topics") or [])],
-        "fields_used": [name for _, name in fields],
-        "n_matches": len(matches),
-        "top_cited": get_works(author_id, "cited_by_count:desc", field_ids, n),
-        "recent": get_works(author_id, "publication_date:desc", field_ids, n),
+        "name": author["display_name"],
+        "id": author["id"],
+        "works_count": author["works_count"],
+        "cited_by_count": author["cited_by_count"],
+        "institutions": [i["display_name"] for i in (author.get("last_known_institutions") or [])],
+        "topics": [t["display_name"] for t in (author.get("topics") or [])],
+        "fields_used": [nm for _, nm in fields],
+        "n_matches": n_matches,
+        "top_cited": get_works(author_id, "cited_by_count:desc", field_ids or None, n),
+        "recent": get_works(author_id, "publication_date:desc", field_ids or None, n),
     }
 
+
+def search_professor(name, college, prefer_field=17, min_share=0.10, n=5):
+    """Old one-call interface, kept so distill.py and the experiments still work."""
+    matches = find_candidates(name, college, prefer_field)
+    if not matches:
+        return None
+    return build_result(matches[0], len(matches), min_share, n)
 
 # ---------- run directly for experiments ----------
 
